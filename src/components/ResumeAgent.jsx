@@ -713,17 +713,17 @@ export default function ResumeAgent() {
               <span key={i} style={{ background: "rgba(212,168,83,0.1)", border: "1px solid #3a2e1a", borderRadius: 20, padding: "0.15rem 0.5rem", fontSize: "0.65rem", color: "#9a7a40" }}>{v}</span>
             ))}
           </div>
-          <button className="icon-btn" onClick={() => setShowHistory(true)} title="Session History" style={{ color: "#4a3a28", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>🕐</button>
-          <button className="icon-btn" onClick={() => setShowSettings(true)} title="Preferences" style={{ color: "#4a3a28", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>⚙</button>
-          {hasResume && <button className="icon-btn" onClick={() => setShowScore(true)} title="Score Resume" style={{ color: "#4a3a28", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>📊</button>}
-          {hasResume && messages.length > 0 && <button className="icon-btn" onClick={() => setShowInterview(true)} title="Interview Prep" style={{ color: "#4a3a28", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>🎤</button>}
-          {exportedText && <button className="icon-btn" onClick={() => setShowDiff(true)} title="Before/After Diff" style={{ color: "#4a3a28", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>⟷</button>}
+          <button className="icon-btn" onClick={() => setShowHistory(true)} title="Session History" style={{ color: "#8a7a68", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>🕐</button>
+          <button className="icon-btn" onClick={() => setShowSettings(true)} title="Preferences" style={{ color: "#8a7a68", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>⚙</button>
+          {hasResume && <button className="icon-btn" onClick={() => setShowScore(true)} title="Score Resume" style={{ color: "#8a7a68", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>📊</button>}
+          {hasResume && messages.length > 0 && <button className="icon-btn" onClick={() => setShowInterview(true)} title="Interview Prep" style={{ color: "#8a7a68", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>🎤</button>}
+          {exportedText && <button className="icon-btn" onClick={() => setShowDiff(true)} title="Before/After Diff" style={{ color: "#8a7a68", fontSize: "1rem", padding: "0.3rem 0.4rem" }}>⟷</button>}
           <div style={{ width: 1, height: 20, background: "#2a2420", margin: "0 0.15rem" }} />
           <button onClick={handleExport} disabled={!canExport || exportState !== "idle"} className="export-btn"
             style={{ background: exportState === "done" ? "rgba(74,122,74,0.2)" : "rgba(212,168,83,0.07)", border: `1px solid ${exportState === "done" ? "#4a7a4a" : "#3a2e1a"}`, borderRadius: 7, padding: "0.35rem 0.8rem", color: exportState === "done" ? "#5cb85c" : "#d4a853", fontSize: "0.75rem", cursor: canExport && exportState === "idle" ? "pointer" : "not-allowed", whiteSpace: "nowrap" }}>
             {exportLabel}
           </button>
-          <button onClick={clearAll} className="icon-btn" style={{ color: "#3a2a1a", fontSize: "0.75rem", padding: "0.3rem 0.5rem", letterSpacing: "0.04em" }}>↺ Reset</button>
+          <button onClick={clearAll} className="icon-btn" style={{ color: "#8a7a68", fontSize: "0.75rem", padding: "0.3rem 0.5rem", letterSpacing: "0.04em" }}>↺ Reset</button>
         </div>
       </div>
 
@@ -731,7 +731,7 @@ export default function ResumeAgent() {
       <div style={{ display: "flex", borderBottom: "1px solid #1e1c24", background: "#0a0a0d", padding: "0 1.5rem", alignItems: "center", flexShrink: 0 }}>
         {tabDefs.map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)} className="tab-btn"
-            style={{ padding: "0.6rem 1rem", background: "none", border: "none", borderBottom: activeTab === tab.id ? "2px solid #d4a853" : "2px solid transparent", color: activeTab === tab.id ? "#e8c97a" : "#4a3a28", cursor: "pointer", fontSize: "0.82rem", fontWeight: activeTab === tab.id ? 600 : 400, marginBottom: "-1px" }}>
+            style={{ padding: "0.6rem 1rem", background: "none", border: "none", borderBottom: activeTab === tab.id ? "2px solid #d4a853" : "2px solid transparent", color: activeTab === tab.id ? "#e8c97a" : "#8a7a68", cursor: "pointer", fontSize: "0.82rem", fontWeight: activeTab === tab.id ? 600 : 400, marginBottom: "-1px" }}>
             {tab.label}
           </button>
         ))}
@@ -937,6 +937,22 @@ export default function ResumeAgent() {
               />
               <button onClick={() => sendMessage()} disabled={!input.trim() || loading} className="send-btn"
                 style={{ background: "linear-gradient(135deg, #d4a853, #8b6520)", border: "none", borderRadius: 9, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 17, flexShrink: 0 }}>→</button>
+            </div>
+
+            {/* Footer */}
+            <div style={{ background: "#0a0a0d", borderTop: "1px solid #141218", padding: "0.4rem 1.5rem", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+              <span style={{ fontSize: "0.7rem", color: "#9a8060", letterSpacing: "0.04em" }}>
+                Created by Brandon Klask
+              </span>
+              <span style={{ fontSize: "0.7rem", color: "#9a8060", letterSpacing: "0.04em" }}>
+                Powered by{" "}
+                <a href="https://claude.ai" target="_blank" rel="noopener noreferrer"
+                  style={{ color: "#9a8060", textDecoration: "none" }}
+                  onMouseEnter={e => e.target.style.color = "#d4a853"}
+                  onMouseLeave={e => e.target.style.color = "#9a8060"}>
+                  Claude.ai
+                </a>
+              </span>
             </div>
           </>
         )}
