@@ -516,22 +516,46 @@ export default function ResumeAgent() {
   const fetchJobUrl = async () => {
     if (!jobUrl.trim()) return;
     setFetchingUrl(true);
+    setFileError("");
     try {
-      // Try to extract job description text from URL via Claude with web search
-      const res = await fetch("/api/claude", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+      // Step 1: Scrape the page via Jina.ai (free, no API key needed)
+      const scrapeRes = await fetch("/api/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: jobUrl.trim() }),
+      });
+      const scrapeData = await scrapeRes.json();
+
+      if (!scrapeRes.ok || !scrapeData.text) {
+        setFileError(scrapeData.error || "Could not read that page. Try pasting the job description manually.");
+        setFetchingUrl(false);
+        return;
+      }
+
+      // Step 2: Send the scraped text to Claude to extract just the job description
+      const claudeRes = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1500,
-          system: "Extract the full job description text from the provided URL. Return only the job description text — role, responsibilities, requirements, company info. No commentary.",
-          messages: [{ role: "user", content: `Extract the job description from this URL: ${jobUrl}` }],
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1500,
+          system: "You are given raw webpage text. Extract and return only the job description content — the role title, responsibilities, requirements, qualifications, and company description. Remove all navigation, ads, headers, footers, and unrelated content. Return plain text only, no markdown.",
+          messages: [{ role: "user", content: `Extract the job description from this page content:\n\n${scrapeData.text}` }],
         }),
       });
-      const data = await res.json();
-      const text = data.content?.filter(c => c.type === "text").map(c => c.text).join("\n") || "";
-      if (text.length > 100) { setJobDesc(text); setActiveTab(MODES.CHAT); }
-      else setFileError("Could not extract job description from that URL. Please paste it manually.");
-    } catch { setFileError("Could not fetch URL. Please paste the job description manually."); }
+      const claudeData = await claudeRes.json();
+      const extracted = claudeData.content?.[0]?.text || "";
+
+      if (extracted.length > 100) {
+        setJobDesc(extracted);
+        setJobUrl("");
+        setActiveTab(MODES.CHAT);
+      } else {
+        setFileError("Could not extract a job description from that page. Please paste it manually.");
+      }
+    } catch {
+      setFileError("Could not fetch that URL. Please paste the job description manually.");
+    }
     setFetchingUrl(false);
   };
 
@@ -751,17 +775,45 @@ export default function ResumeAgent() {
         {activeTab === MODES.JOB && (
           <div style={{ flex: 1, padding: "1.25rem 1.5rem", display: "flex", flexDirection: "column", gap: "0.75rem", overflowY: "auto" }}>
             <label style={{ color: "#7a6050", fontSize: "0.72rem", letterSpacing: "0.1em", textTransform: "uppercase" }}>Job Description</label>
+
             {/* URL import */}
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <input value={jobUrl} onChange={e => setJobUrl(e.target.value)} onKeyDown={e => e.key === "Enter" && fetchJobUrl()} placeholder="Paste a LinkedIn / Indeed / job URL to auto-import..."
-                style={{ flex: 1, background: "#0e0c12", border: "1px solid #1e1c24", borderRadius: 7, padding: "0.6rem 0.85rem", color: "#d8d0c4", fontSize: "0.82rem", outline: "none" }} />
-              <button onClick={fetchJobUrl} disabled={!jobUrl.trim() || fetchingUrl}
-                style={{ background: "rgba(91,155,213,0.15)", border: "1px solid #1e2a3a", borderRadius: 7, padding: "0.5rem 0.85rem", color: fetchingUrl ? "#4a6a8a" : "#5b9bd5", cursor: "pointer", fontSize: "0.78rem", whiteSpace: "nowrap" }}>
-                {fetchingUrl ? "Fetching..." : "⬇ Import"}
-              </button>
+            <div style={{ background: "#0e0c12", border: "1px solid #1e2a3a", borderRadius: 10, padding: "0.85rem 1rem" }}>
+              <div style={{ fontSize: "0.72rem", color: "#4a6a8a", marginBottom: "0.5rem", letterSpacing: "0.05em" }}>
+                🔗 Import from URL — paste any job posting link
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <input
+                  value={jobUrl}
+                  onChange={e => { setJobUrl(e.target.value); setFileError(""); }}
+                  onKeyDown={e => e.key === "Enter" && fetchJobUrl()}
+                  placeholder="https://linkedin.com/jobs/... or indeed.com/..."
+                  disabled={fetchingUrl}
+                  style={{ flex: 1, background: "#141218", border: "1px solid #1e2a3a", borderRadius: 7, padding: "0.6rem 0.85rem", color: "#d8d0c4", fontSize: "0.82rem", outline: "none", opacity: fetchingUrl ? 0.6 : 1 }}
+                />
+                <button
+                  onClick={fetchJobUrl}
+                  disabled={!jobUrl.trim() || fetchingUrl}
+                  style={{ background: fetchingUrl ? "rgba(91,155,213,0.08)" : "rgba(91,155,213,0.15)", border: "1px solid #1e2a3a", borderRadius: 7, padding: "0.5rem 0.85rem", color: fetchingUrl ? "#4a6a8a" : "#5b9bd5", cursor: !jobUrl.trim() || fetchingUrl ? "not-allowed" : "pointer", fontSize: "0.78rem", whiteSpace: "nowrap", opacity: !jobUrl.trim() ? 0.4 : 1 }}>
+                  {fetchingUrl ? "⏳ Importing..." : "⬇ Import"}
+                </button>
+              </div>
+              {fetchingUrl && (
+                <div style={{ fontSize: "0.72rem", color: "#4a6a8a", marginTop: "0.5rem" }}>
+                  Fetching page → extracting job description... this takes about 5 seconds
+                </div>
+              )}
+              {fileError && (
+                <div style={{ fontSize: "0.75rem", color: "#c06060", marginTop: "0.5rem", background: "rgba(192,96,96,0.08)", borderRadius: 6, padding: "0.4rem 0.6rem" }}>
+                  ⚠ {fileError}
+                </div>
+              )}
+              <div style={{ fontSize: "0.68rem", color: "#3a3028", marginTop: "0.5rem" }}>
+                Works with most job sites. LinkedIn may require manual paste.
+              </div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /><span style={{ color: "#3a2e1a", fontSize: "0.68rem", letterSpacing: "0.1em" }}>OR PASTE</span><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /></div>
-            <textarea value={jobDesc} onChange={e => setJobDesc(e.target.value)} placeholder="Paste the full job description here..." style={{ flex: 1, background: "#0e0c12", border: "1px solid #1e1c24", borderRadius: 8, padding: "0.85rem", color: "#d8d0c4", fontSize: "0.83rem", lineHeight: 1.7, outline: "none", minHeight: "50vh" }} />
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /><span style={{ color: "#3a2e1a", fontSize: "0.68rem", letterSpacing: "0.1em" }}>OR PASTE MANUALLY</span><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /></div>
+            <textarea value={jobDesc} onChange={e => setJobDesc(e.target.value)} placeholder="Paste the full job description here..." style={{ flex: 1, background: "#0e0c12", border: "1px solid #1e1c24", borderRadius: 8, padding: "0.85rem", color: "#d8d0c4", fontSize: "0.83rem", lineHeight: 1.7, outline: "none", minHeight: "40vh" }} />
             <button onClick={() => setActiveTab(MODES.CHAT)} style={{ alignSelf: "flex-end", background: "linear-gradient(135deg, #d4a853, #8b6520)", border: "none", borderRadius: 7, padding: "0.5rem 1.25rem", color: "#0d0d0f", fontWeight: 600, cursor: "pointer", fontSize: "0.82rem" }}>Done → Chat</button>
           </div>
         )}
