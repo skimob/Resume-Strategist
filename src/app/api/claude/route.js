@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
 
-// This route sits between your React app and Anthropic.
-// Your API key lives here on the server — it is NEVER sent to the browser.
-
 export async function POST(request) {
-  // Basic auth check — must have authed via password gate
-  // (session storage on client; for extra security you could use cookies here)
-
   const body = await request.json();
 
-  // Forward the request to Anthropic, injecting the secret key
+  console.log("API Key exists:", !!process.env.ANTHROPIC_API_KEY);
+  console.log("API Key prefix:", process.env.ANTHROPIC_API_KEY?.slice(0, 15));
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -22,6 +18,7 @@ export async function POST(request) {
 
   if (!response.ok) {
     const error = await response.text();
+    console.log("Anthropic error:", error);
     return NextResponse.json({ error }, { status: response.status });
   }
 
