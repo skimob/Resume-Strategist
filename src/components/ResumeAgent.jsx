@@ -283,7 +283,7 @@ const ScorePanel = ({ resume, jobDesc, onClose }) => {
   useEffect(() => {
     const run = async () => {
       try {
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
+        const res = await fetch("/api/claude", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "claude-sonnet-4-20250514", max_tokens: 1000,
@@ -469,7 +469,7 @@ const InterviewPanel = ({ resume, jobDesc, onClose }) => {
   useEffect(() => {
     const run = async () => {
       try {
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
+        const res = await fetch("/api/claude", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "claude-sonnet-4-20250514", max_tokens: 1500,
@@ -616,7 +616,7 @@ export default function ResumeAgent() {
     setCoverMessages(newMessages);
     setCoverLoading(true);
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
@@ -637,7 +637,7 @@ export default function ResumeAgent() {
     const conversationSummary = coverMessages.map(m => `${m.role === "user" ? "User" : "Agent"}: ${m.content}`).join("\n\n");
     const original = coverLetter || "";
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
@@ -707,7 +707,7 @@ export default function ResumeAgent() {
         : rawText.trim();
 
       // Step 2: Send scraped text to Claude to extract just the job description
-      const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
+      const claudeRes = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -743,7 +743,7 @@ export default function ResumeAgent() {
     setMessages(newMessages);
     setLoading(true);
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
@@ -779,7 +779,7 @@ export default function ResumeAgent() {
     setExportState("generating");
     const conversationSummary = messages.map(m => `${m.role === "user" ? "User" : "Agent"}: ${m.content}`).join("\n\n");
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 3000,
