@@ -1,10 +1,9 @@
-"use client";
 import { useState, useRef, useEffect, useCallback } from "react";
 import * as mammoth from "mammoth";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const MODES = { CHAT: "chat", RESUME: "resume", JOB: "job", SETTINGS: "settings", HISTORY: "history", SCORE: "score", INTERVIEW: "interview", DIFF: "diff" };
+const MODES = { CHAT: "chat", RESUME: "resume", JOB: "job", COVER: "cover", SETTINGS: "settings", HISTORY: "history", SCORE: "score", INTERVIEW: "interview", DIFF: "diff" };
 
 const SECTION_CHECKLIST = ["Contact Info", "Summary / Objective", "Work Experience", "Skills", "Education", "Bullet Points", "ATS Keywords", "Quantified Achievements"];
 
@@ -13,9 +12,42 @@ const QUICK_FOLLOW_UPS = [
   ["Strengthen the opening", "Add industry keywords", "Improve action verbs", "Make bullets punchier"],
 ];
 
+const COVER_LETTER_SYSTEM_PROMPT = `You are an expert cover letter writer and career coach. You help users create and tailor compelling cover letters.
+
+When tailoring an existing cover letter:
+- Align it more closely with the job description keywords and requirements
+- Strengthen weak phrases with more confident, specific language
+- Ensure accomplishments from the resume are reflected where relevant
+- Maintain the user's authentic voice — don't make it sound generic
+
+When creating a cover letter from scratch:
+- Use the resume to pull specific accomplishments, metrics, and skills
+- Mirror language and keywords from the job description
+- Structure: opening hook → key qualifications → specific example → closing call to action
+- Keep it to one page, professional but with character
+- After each response, suggest 3-4 follow-up improvements (prefix with "**Follow-ups:**" as a bullet list)`;
+
+const buildCoverSystemPrompt = (resume, jobDesc, coverLetter, prefs) => {
+  let prompt = COVER_LETTER_SYSTEM_PROMPT;
+  const tone = prefs?.tone || "professional";
+  prompt += `\n\nUser tone preference: ${tone}.`;
+  if (resume?.trim()) prompt += `\n\n---\n[USER'S RESUME]\n${resume}`;
+  if (jobDesc?.trim()) prompt += `\n\n---\n[TARGET JOB DESCRIPTION]\n${jobDesc}`;
+  if (coverLetter?.trim()) prompt += `\n\n---\n[USER'S EXISTING COVER LETTER]\n${coverLetter}`;
+  return prompt;
+};
+
+const COVER_EXPORT_PROMPT = `You are a cover letter rewriting assistant. Produce a final polished version incorporating all discussed improvements.
+RULES:
+- Output ONLY the cover letter text — no commentary, no preamble
+- Preserve the EXACT same number of non-empty paragraphs as the original if one was provided
+- Preserve blank lines in the same positions as the original
+- Keep names, contact info, dates, and company names unchanged unless explicitly discussed
+- Output plain text only — no markdown, no ** bold, no ## headers`;
+
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
-const buildSystemPrompt = (resume, jobDesc, prefs) => {
+const buildSystemPrompt = (resume, jobDesc, prefs, coverLetter = "", resumeSlots = [], activeResumeIdx = 0) => {
   const tone = prefs?.tone || "professional";
   const level = prefs?.level || "mid";
   const industry = prefs?.industry || "general";
@@ -31,8 +63,23 @@ Your approach:
 - After each response, suggest 3-4 short follow-up actions the user might want (prefix them with "**Follow-ups:**" on a new line, as a bullet list)
 - Be direct, honest, and encouraging`;
 
-  if (resume?.trim()) prompt += `\n\n---\n[USER'S RESUME]\n${resume}`;
+  // Include all loaded resumes, marking the active one
+  const loadedSlots = resumeSlots.filter(s => s.text.trim().length > 0);
+  if (loadedSlots.length > 1) {
+    loadedSlots.forEach((slot, i) => {
+      const isActive = resumeSlots.indexOf(slot) === activeResumeIdx;
+      const label = slot.nickname || `Resume ${i + 1}`;
+      prompt += `\n\n---\n[${label.toUpperCase()}${isActive ? " — CURRENTLY ACTIVE" : ""}${slot.fileName ? ` (${slot.fileName})` : ""}]\n${slot.text}`;
+    });
+    prompt += `\n\nThe user has ${loadedSlots.length} resumes loaded. When asked to compare, evaluate which is a stronger starting point for the job description and explain why.`;
+  } else if (resume?.trim()) {
+    const label = resumeSlots[activeResumeIdx]?.nickname || "USER'S RESUME";
+    const fname = resumeSlots[activeResumeIdx]?.fileName;
+    prompt += `\n\n---\n[${label.toUpperCase()}${fname ? ` (${fname})` : ""}]\n${resume}`;
+  }
+
   if (jobDesc?.trim()) prompt += `\n\n---\n[TARGET JOB DESCRIPTION]\n${jobDesc}`;
+  if (coverLetter?.trim()) prompt += `\n\n---\n[USER'S COVER LETTER]\n${coverLetter}`;
   return prompt;
 };
 
@@ -236,7 +283,7 @@ const ScorePanel = ({ resume, jobDesc, onClose }) => {
   useEffect(() => {
     const run = async () => {
       try {
-        const res = await fetch("/api/claude", {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "claude-sonnet-4-20250514", max_tokens: 1000,
@@ -422,7 +469,7 @@ const InterviewPanel = ({ resume, jobDesc, onClose }) => {
   useEffect(() => {
     const run = async () => {
       try {
-        const res = await fetch("/api/claude", {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "claude-sonnet-4-20250514", max_tokens: 1500,
@@ -461,15 +508,42 @@ export default function ResumeAgent() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState(MODES.CHAT);
-  const [resume, setResume] = useState("");
-  const [resumeArrayBuffer, setResumeArrayBuffer] = useState(null);
+
+  // ── Multi-resume slots ──────────────────────────────────────────────────
+  // Each slot: { text, arrayBuffer, fileName, nickname }
+  const [resumeSlots, setResumeSlots] = useState([
+    { text: "", arrayBuffer: null, fileName: "", nickname: "" },
+    { text: "", arrayBuffer: null, fileName: "", nickname: "" },
+    { text: "", arrayBuffer: null, fileName: "", nickname: "" },
+  ]);
+  const [activeResumeIdx, setActiveResumeIdx] = useState(0);
+  const [slotFileLoading, setSlotFileLoading] = useState([false, false, false]);
+  const [slotDragOver, setSlotDragOver] = useState([false, false, false]);
+  const slotFileInputRefs = [useRef(null), useRef(null), useRef(null)];
+
+  // Convenience getters for the active resume
+  const resume = resumeSlots[activeResumeIdx].text;
+  const resumeArrayBuffer = resumeSlots[activeResumeIdx].arrayBuffer;
+  const resumeFileName = resumeSlots[activeResumeIdx].fileName;
+  // ────────────────────────────────────────────────────────────────────────
+
   const [jobDesc, setJobDesc] = useState("");
-  const [resumeFileName, setResumeFileName] = useState("");
-  const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState("");
-  const [dragOver, setDragOver] = useState(false);
   const [exportState, setExportState] = useState("idle");
   const [exportedText, setExportedText] = useState("");
+  const [coverLetter, setCoverLetter] = useState("");
+  const [coverArrayBuffer, setCoverArrayBuffer] = useState(null);
+  const [coverFileName, setCoverFileName] = useState("");
+  const [coverFileLoading, setCoverFileLoading] = useState(false);
+  const [coverDragOver, setCoverDragOver] = useState(false);
+  const [coverExportState, setCoverExportState] = useState("idle");
+  const [coverMode, setCoverMode] = useState("tailor");
+  const [coverMessages, setCoverMessages] = useState([]);
+  const [coverInput, setCoverInput] = useState("");
+  const [coverLoading, setCoverLoading] = useState(false);
+  const coverFileInputRef = useRef(null);
+  const coverTextareaRef = useRef(null);
+  const coverMessagesEndRef = useRef(null);
   const [prefs, setPrefs] = useState({ tone: "professional", level: "mid", industry: "general" });
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -482,7 +556,6 @@ export default function ResumeAgent() {
   const [fetchingUrl, setFetchingUrl] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
-  const fileInputRef = useRef(null);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
 
@@ -497,20 +570,111 @@ export default function ResumeAgent() {
     setSessions(updated);
   }, [messages]);
 
-  const parseDocxFile = async (file) => {
+  const parseDocxFile = async (file, slotIdx) => {
     setFileError("");
     if (!file) return;
     const validTypes = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"];
     if (!validTypes.includes(file.type) && !file.name.match(/\.(docx|doc)$/i)) { setFileError("Please upload a .docx or .doc file."); return; }
-    setFileLoading(true);
+    setSlotFileLoading(prev => { const n = [...prev]; n[slotIdx] = true; return n; });
     try {
       const ab = await file.arrayBuffer();
-      setResumeArrayBuffer(ab.slice(0));
       const result = await mammoth.extractRawText({ arrayBuffer: ab });
-      setResume(result.value);
-      setResumeFileName(file.name);
+      setResumeSlots(prev => {
+        const n = [...prev];
+        n[slotIdx] = { text: result.value, arrayBuffer: ab.slice(0), fileName: file.name, nickname: n[slotIdx].nickname };
+        return n;
+      });
+      setActiveResumeIdx(slotIdx);
     } catch { setFileError("Could not read the file. Please try a .docx format or paste text instead."); }
-    setFileLoading(false);
+    setSlotFileLoading(prev => { const n = [...prev]; n[slotIdx] = false; return n; });
+  };
+
+  useEffect(() => { coverMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [coverMessages, coverLoading]);
+
+  const parseCoverFile = async (file) => {
+    if (!file) return;
+    const validTypes = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"];
+    if (!validTypes.includes(file.type) && !file.name.match(/\.(docx|doc)$/i)) { setFileError("Please upload a .docx or .doc file."); return; }
+    setCoverFileLoading(true);
+    try {
+      const ab = await file.arrayBuffer();
+      setCoverArrayBuffer(ab.slice(0));
+      const result = await mammoth.extractRawText({ arrayBuffer: ab });
+      setCoverLetter(result.value);
+      setCoverFileName(file.name);
+      setCoverMode("tailor");
+    } catch { setFileError("Could not read the file."); }
+    setCoverFileLoading(false);
+  };
+
+  const sendCoverMessage = async (text) => {
+    const userText = text || coverInput.trim();
+    if (!userText || coverLoading) return;
+    setCoverInput("");
+    if (coverTextareaRef.current) coverTextareaRef.current.style.height = "auto";
+    const newMessages = [...coverMessages, { role: "user", content: userText }];
+    setCoverMessages(newMessages);
+    setCoverLoading(true);
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 2000,
+          system: buildCoverSystemPrompt(resume, jobDesc, coverLetter, prefs),
+          messages: newMessages,
+        }),
+      });
+      const data = await res.json();
+      const reply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
+      setCoverMessages([...newMessages, { role: "assistant", content: reply }]);
+    } catch { setCoverMessages([...newMessages, { role: "assistant", content: "Connection error. Please try again." }]); }
+    setCoverLoading(false);
+  };
+
+  const handleCoverExport = async () => {
+    if (coverMessages.length === 0) { alert("Have a conversation first so the agent knows what to write."); return; }
+    setCoverExportState("generating");
+    const conversationSummary = coverMessages.map(m => `${m.role === "user" ? "User" : "Agent"}: ${m.content}`).join("\n\n");
+    const original = coverLetter || "";
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 2000,
+          system: COVER_EXPORT_PROMPT,
+          messages: [{ role: "user", content: `${original ? `ORIGINAL COVER LETTER:\n${original}\n\n` : ""}CONVERSATION LOG:\n${conversationSummary}\n\nProduce the final polished cover letter.` }],
+        }),
+      });
+      const data = await res.json();
+      const finalText = data.content?.[0]?.text;
+      if (!finalText) throw new Error("No content returned");
+      setCoverExportState("downloading");
+      if (coverArrayBuffer) {
+        await patchAndDownloadDocx(coverArrayBuffer, finalText, `${coverFileName.replace(/\.(docx|doc)$/i, "")}-tailored.docx`);
+      } else {
+        // No original file — build a simple docx from scratch using JSZip
+        const JSZip = await loadJSZip();
+        const lines = finalText.split("\n");
+        const xmlParas = lines.map(line => {
+          const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+          if (!line.trim()) return `<w:p><w:r><w:t></w:t></w:r></w:p>`;
+          return `<w:p><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">${esc(line)}</w:t></w:r></w:p>`;
+        }).join("\n");
+        const docXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${xmlParas}<w:sectPr><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
+        const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
+        const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+        const zip = new JSZip();
+        zip.file("[Content_Types].xml", contentTypes);
+        zip.file("_rels/.rels", rels);
+        zip.file("word/document.xml", docXml);
+        const blob = await zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+        const url = URL.createObjectURL(blob);
+        const a = Object.assign(document.createElement("a"), { href: url, download: "cover-letter.docx" });
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      }
+      setCoverExportState("done");
+      setTimeout(() => setCoverExportState("idle"), 3000);
+    } catch { setCoverExportState("idle"); alert("Export failed. Please try again."); }
   };
 
   const fetchJobUrl = async () => {
@@ -518,31 +682,42 @@ export default function ResumeAgent() {
     setFetchingUrl(true);
     setFileError("");
     try {
-      // Step 1: Scrape the page via Jina.ai (free, no API key needed)
-      const scrapeRes = await fetch("/api/scrape", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: jobUrl.trim() }),
+      // Step 1: Fetch page content via Jina.ai (free, no API key, works directly from browser)
+      const jinaUrl = `https://r.jina.ai/${jobUrl.trim()}`;
+      const jinaRes = await fetch(jinaUrl, {
+        headers: { "Accept": "text/plain" },
       });
-      const scrapeData = await scrapeRes.json();
 
-      if (!scrapeRes.ok || !scrapeData.text) {
-        setFileError(scrapeData.error || "Could not read that page. Try pasting the job description manually.");
+      if (!jinaRes.ok) {
+        setFileError(`Could not fetch that page (status ${jinaRes.status}). Please paste the job description manually.`);
         setFetchingUrl(false);
         return;
       }
 
-      // Step 2: Send the scraped text to Claude to extract just the job description
-      const claudeRes = await fetch("/api/claude", {
+      const rawText = await jinaRes.text();
+      if (!rawText || rawText.trim().length < 100) {
+        setFileError("Page content too short or blocked. Please paste the job description manually.");
+        setFetchingUrl(false);
+        return;
+      }
+
+      // Cap at 8000 chars to keep the Claude request lean
+      const truncated = rawText.trim().length > 8000
+        ? rawText.trim().slice(0, 8000) + "\n\n[Content truncated]"
+        : rawText.trim();
+
+      // Step 2: Send scraped text to Claude to extract just the job description
+      const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 1500,
           system: "You are given raw webpage text. Extract and return only the job description content — the role title, responsibilities, requirements, qualifications, and company description. Remove all navigation, ads, headers, footers, and unrelated content. Return plain text only, no markdown.",
-          messages: [{ role: "user", content: `Extract the job description from this page content:\n\n${scrapeData.text}` }],
+          messages: [{ role: "user", content: `Extract the job description from this page content:\n\n${truncated}` }],
         }),
       });
+
       const claudeData = await claudeRes.json();
       const extracted = claudeData.content?.[0]?.text || "";
 
@@ -568,11 +743,11 @@ export default function ResumeAgent() {
     setMessages(newMessages);
     setLoading(true);
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
-          system: buildSystemPrompt(resume, jobDesc, prefs),
+          system: buildSystemPrompt(resume, jobDesc, prefs, coverLetter, resumeSlots, activeResumeIdx),
           messages: newMessages,
         }),
       });
@@ -604,7 +779,7 @@ export default function ResumeAgent() {
     setExportState("generating");
     const conversationSummary = messages.map(m => `${m.role === "user" ? "User" : "Agent"}: ${m.content}`).join("\n\n");
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 3000,
@@ -642,16 +817,25 @@ export default function ResumeAgent() {
 
   const clearAll = () => {
     if (messages.length > 0 || resume || jobDesc) {
-      if (!window.confirm("Start a new session? This will clear your resume, job description, and conversation.")) return;
+      if (!window.confirm("Start a new session? This will clear all resumes, job description, cover letter, and conversation.")) return;
     }
-    setMessages([]); setInput(""); setResume(""); setResumeArrayBuffer(null);
-    setResumeFileName(""); setJobDesc(""); setFileError(""); setExportState("idle");
-    setExportedText(""); setChecklist({}); setActiveTab(MODES.CHAT);
+    setMessages([]); setInput("");
+    setResumeSlots([
+      { text: "", arrayBuffer: null, fileName: "", nickname: "" },
+      { text: "", arrayBuffer: null, fileName: "", nickname: "" },
+      { text: "", arrayBuffer: null, fileName: "", nickname: "" },
+    ]);
+    setActiveResumeIdx(0);
+    setJobDesc(""); setFileError(""); setExportState("idle");
+    setExportedText(""); setChecklist({}); setCoverLetter(""); setCoverArrayBuffer(null);
+    setCoverFileName(""); setCoverMessages([]); setCoverInput(""); setCoverExportState("idle");
+    setActiveTab(MODES.CHAT);
   };
 
   const hasResume = resume.trim().length > 0;
   const canExport = hasResume && messages.length > 0 && !!resumeArrayBuffer;
   const doneCount = Object.values(checklist).filter(Boolean).length;
+  const loadedCount = resumeSlots.filter(s => s.text.trim().length > 0).length;
 
   const exportLabel = { idle: "⬇ Export .docx", generating: "✦ Applying changes...", downloading: "⏳ Building...", done: "✓ Downloaded!" }[exportState];
 
@@ -659,6 +843,7 @@ export default function ResumeAgent() {
     { id: MODES.CHAT, label: "💬 Chat" },
     { id: MODES.RESUME, label: "📋 Resume" },
     { id: MODES.JOB, label: "🎯 Job" },
+    { id: MODES.COVER, label: "✉ Cover Letter" },
   ];
 
   return (
@@ -745,8 +930,9 @@ export default function ResumeAgent() {
           </div>
         )}
         <div style={{ marginLeft: doneCount > 0 ? "0.75rem" : "auto", display: "flex", gap: "0.4rem" }}>
-          {hasResume && <span style={{ background: "#1e3a1e", color: "#5cb85c", fontSize: "0.65rem", padding: "0.15rem 0.55rem", borderRadius: 20, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>✓ {resumeFileName || "Resume"}</span>}
+          {hasResume && <span style={{ background: "#1e3a1e", color: "#5cb85c", fontSize: "0.65rem", padding: "0.15rem 0.55rem", borderRadius: 20, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>✓ {loadedCount > 1 ? `${loadedCount} resumes · ${resumeSlots[activeResumeIdx].nickname || `Resume ${activeResumeIdx + 1}`} active` : resumeSlots[activeResumeIdx].nickname || resumeFileName || "Resume"}</span>}
           {jobDesc && <span style={{ background: "#1e2a3a", color: "#5b9bd5", fontSize: "0.65rem", padding: "0.15rem 0.55rem", borderRadius: 20 }}>✓ JD</span>}
+          {coverLetter && <span style={{ background: "#2a1e3a", color: "#a084d0", fontSize: "0.65rem", padding: "0.15rem 0.55rem", borderRadius: 20 }}>✓ Cover Letter</span>}
         </div>
       </div>
 
@@ -755,19 +941,97 @@ export default function ResumeAgent() {
 
         {/* Resume Tab */}
         {activeTab === MODES.RESUME && (
-          <div style={{ flex: 1, padding: "1.25rem 1.5rem", display: "flex", flexDirection: "column", gap: "0.75rem", overflowY: "auto" }}>
-            <label style={{ color: "#7a6050", fontSize: "0.72rem", letterSpacing: "0.1em", textTransform: "uppercase" }}>Your Resume</label>
-            <div className="upload-zone" onDrop={e => { e.preventDefault(); setDragOver(false); parseDocxFile(e.dataTransfer.files[0]); }} onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onClick={() => fileInputRef.current?.click()}
-              style={{ border: `2px dashed ${dragOver ? "#d4a853" : resumeFileName ? "#4a7a4a" : "#2a2420"}`, borderRadius: 10, padding: "1.5rem", textAlign: "center", cursor: "pointer", background: dragOver ? "rgba(212,168,83,0.05)" : resumeFileName ? "rgba(74,122,74,0.06)" : "rgba(255,255,255,0.01)", display: "flex", flexDirection: "column", alignItems: "center", gap: "0.4rem" }}>
-              <input ref={fileInputRef} type="file" accept=".docx,.doc" style={{ display: "none" }} onChange={e => { parseDocxFile(e.target.files[0]); e.target.value = ""; }} />
-              {fileLoading ? <div style={{ color: "#d4a853", fontSize: "0.85rem" }}>⏳ Reading...</div>
-                : resumeFileName ? <><div style={{ fontSize: "1.5rem" }}>✅</div><div style={{ color: "#6ab86a", fontWeight: 600, fontSize: "0.85rem" }}>{resumeFileName}</div><div style={{ color: "#4a6a4a", fontSize: "0.7rem" }}>{resume.length.toLocaleString()} chars · Click to replace</div></>
-                : <><div style={{ fontSize: "1.75rem" }}>📄</div><div style={{ color: "#c8a84a", fontWeight: 600, fontSize: "0.85rem" }}>Drop your .docx here</div><div style={{ color: "#4a3a28", fontSize: "0.72rem" }}>or click to browse · Format-preserving export</div></>}
+          <div style={{ flex: 1, padding: "1.25rem 1.5rem", display: "flex", flexDirection: "column", gap: "0.85rem", overflowY: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <label style={{ color: "#7a6050", fontSize: "0.72rem", letterSpacing: "0.1em", textTransform: "uppercase" }}>Your Resumes</label>
+              <span style={{ fontSize: "0.68rem", color: "#5a4a38" }}>{loadedCount} of 3 loaded · click a slot to make it active</span>
             </div>
+
+            {/* Compare button — only when 2+ resumes loaded */}
+            {loadedCount >= 2 && (
+              <button
+                onClick={() => { setActiveTab(MODES.CHAT); setTimeout(() => { const msg = `I have ${loadedCount} resumes loaded. Please compare them and tell me which is a better starting point for the job description I've provided, and why.`; }, 100); }}
+                style={{ background: "rgba(212,168,83,0.08)", border: "1px solid #3a2e1a", borderRadius: 8, padding: "0.5rem 1rem", color: "#d4a853", cursor: "pointer", fontSize: "0.78rem", fontFamily: "'DM Sans', sans-serif", textAlign: "left" }}>
+                ✦ Ask agent: which resume is a better match for the job? →
+              </button>
+            )}
+
+            {/* Three resume slots */}
+            {resumeSlots.map((slot, idx) => {
+              const isActive = idx === activeResumeIdx;
+              const isDragging = slotDragOver[idx];
+              const isLoading = slotFileLoading[idx];
+              const hasContent = slot.text.trim().length > 0;
+              return (
+                <div key={idx}
+                  onClick={() => hasContent && setActiveResumeIdx(idx)}
+                  style={{ border: `2px solid ${isActive && hasContent ? "#d4a853" : isDragging ? "#8a7a68" : hasContent ? "#2a4a2a" : "#1e1c24"}`, borderRadius: 12, overflow: "hidden", cursor: hasContent ? "pointer" : "default", transition: "border-color 0.2s", background: isActive && hasContent ? "rgba(212,168,83,0.04)" : "transparent" }}>
+                  {/* Slot header */}
+                  <div style={{ padding: "0.5rem 0.85rem", background: "#0a0a0d", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #1e1c24" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: "0.68rem", color: isActive && hasContent ? "#d4a853" : "#5a4a38", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", flexShrink: 0 }}>R{idx + 1}</span>
+                      {isActive && hasContent && <span style={{ fontSize: "0.6rem", background: "rgba(212,168,83,0.15)", color: "#d4a853", padding: "0.1rem 0.45rem", borderRadius: 10, letterSpacing: "0.05em", flexShrink: 0 }}>ACTIVE</span>}
+                      {/* Nickname input */}
+                      <input
+                        value={slot.nickname}
+                        onChange={e => { e.stopPropagation(); setResumeSlots(prev => { const n = [...prev]; n[idx] = { ...n[idx], nickname: e.target.value }; return n; }); }}
+                        onClick={e => e.stopPropagation()}
+                        placeholder={`Label (e.g. "Federal Version")`}
+                        style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: `1px solid ${slot.nickname ? "#3a2e1a" : "#1e1c24"}`, color: slot.nickname ? "#c8a84a" : "#4a3a28", fontSize: "0.72rem", outline: "none", padding: "0.1rem 0.2rem", fontFamily: "'DM Sans', sans-serif" }}
+                      />
+                    </div>
+                    {hasContent && (
+                      <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexShrink: 0 }}>
+                        <span style={{ fontSize: "0.65rem", color: "#4a6a4a" }}>{slot.text.length.toLocaleString()} chars</span>
+                        <button onClick={e => { e.stopPropagation(); setResumeSlots(prev => { const n = [...prev]; n[idx] = { text: "", arrayBuffer: null, fileName: "", nickname: n[idx].nickname }; return n; }); if (isActive && idx > 0) setActiveResumeIdx(0); }}
+                          style={{ background: "none", border: "none", color: "#5a3a3a", cursor: "pointer", fontSize: "0.75rem", padding: "0 0.1rem" }} title="Clear this slot">✕</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Drop zone */}
+                  <div
+                    onDrop={e => { e.preventDefault(); e.stopPropagation(); setSlotDragOver(prev => { const n = [...prev]; n[idx] = false; return n; }); parseDocxFile(e.dataTransfer.files[0], idx); }}
+                    onDragOver={e => { e.preventDefault(); e.stopPropagation(); setSlotDragOver(prev => { const n = [...prev]; n[idx] = true; return n; }); }}
+                    onDragLeave={() => setSlotDragOver(prev => { const n = [...prev]; n[idx] = false; return n; })}
+                    onClick={e => { e.stopPropagation(); slotFileInputRefs[idx].current?.click(); }}
+                    style={{ padding: "0.85rem 1rem", display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer", background: isDragging ? "rgba(212,168,83,0.04)" : "transparent" }}>
+                    <input ref={slotFileInputRefs[idx]} type="file" accept=".docx,.doc" style={{ display: "none" }} onChange={e => { parseDocxFile(e.target.files[0], idx); e.target.value = ""; }} />
+                    {isLoading ? (
+                      <div style={{ color: "#d4a853", fontSize: "0.82rem" }}>⏳ Reading...</div>
+                    ) : hasContent ? (
+                      <>
+                        <span style={{ fontSize: "1.1rem" }}>📄</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "0.82rem", color: hasContent ? "#c8d8c0" : "#6a5a40", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{slot.fileName || "Pasted text"}</div>
+                          <div style={{ fontSize: "0.68rem", color: "#4a6a4a", marginTop: "0.1rem" }}>Click to replace · {slot.arrayBuffer ? "format-preserving export ready" : "paste only"}</div>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <span style={{ fontSize: "1.1rem", opacity: 0.4 }}>📄</span>
+                        <div style={{ fontSize: "0.8rem", color: "#3a3028" }}>Drop .docx here or click to browse</div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Paste area — only show for active or empty slots */}
+                  {(isActive || !hasContent) && (
+                    <div style={{ padding: "0 0.85rem 0.75rem", borderTop: "1px solid #1a1820" }} onClick={e => e.stopPropagation()}>
+                      <textarea
+                        value={slot.text}
+                        onChange={e => { setResumeSlots(prev => { const n = [...prev]; n[idx] = { ...n[idx], text: e.target.value, fileName: n[idx].fileName || "", arrayBuffer: e.target.value !== slot.text ? null : n[idx].arrayBuffer }; return n; }); setActiveResumeIdx(idx); }}
+                        placeholder="Or paste resume text here..."
+                        style={{ width: "100%", background: "#0a0a0d", border: "none", borderTop: "1px solid #1a1820", padding: "0.6rem 0", color: "#d8d0c4", fontSize: "0.8rem", lineHeight: 1.65, outline: "none", minHeight: "8vh", fontFamily: "'DM Sans', sans-serif", resize: "vertical" }}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
             {fileError && <div style={{ color: "#c06060", fontSize: "0.78rem", background: "rgba(192,96,96,0.08)", borderRadius: 7, padding: "0.4rem 0.7rem" }}>⚠ {fileError}</div>}
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /><span style={{ color: "#3a2e1a", fontSize: "0.68rem", letterSpacing: "0.1em" }}>OR PASTE</span><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /></div>
-            <textarea value={resume} onChange={e => { setResume(e.target.value); if (resumeFileName) { setResumeFileName(""); setResumeArrayBuffer(null); } }} placeholder="Paste resume text..." style={{ background: "#0e0c12", border: "1px solid #1e1c24", borderRadius: 8, padding: "0.85rem", color: "#d8d0c4", fontSize: "0.83rem", lineHeight: 1.7, outline: "none", minHeight: "22vh" }} />
-            <button onClick={() => setActiveTab(MODES.CHAT)} style={{ alignSelf: "flex-end", background: "linear-gradient(135deg, #d4a853, #8b6520)", border: "none", borderRadius: 7, padding: "0.5rem 1.25rem", color: "#0d0d0f", fontWeight: 600, cursor: "pointer", fontSize: "0.82rem" }}>Done → Chat</button>
+            <button onClick={() => setActiveTab(MODES.CHAT)} style={{ alignSelf: "flex-end", background: "linear-gradient(135deg, #d4a853, #8b6520)", border: "none", borderRadius: 7, padding: "0.5rem 1.25rem", color: "#0d0d0f", fontWeight: 600, cursor: "pointer", fontSize: "0.82rem", fontFamily: "'DM Sans', sans-serif" }}>Done → Chat</button>
           </div>
         )}
 
@@ -793,7 +1057,7 @@ export default function ResumeAgent() {
                 <button
                   onClick={fetchJobUrl}
                   disabled={!jobUrl.trim() || fetchingUrl}
-                  style={{ background: fetchingUrl ? "rgba(91,155,213,0.08)" : "rgba(91,155,213,0.15)", border: "1px solid #1e2a3a", borderRadius: 7, padding: "0.5rem 0.85rem", color: fetchingUrl ? "#4a6a8a" : "#5b9bd5", cursor: !jobUrl.trim() || fetchingUrl ? "not-allowed" : "pointer", fontSize: "0.78rem", whiteSpace: "nowrap", opacity: !jobUrl.trim() ? 0.4 : 1 }}>
+                  style={{ background: fetchingUrl ? "rgba(91,155,213,0.08)" : "rgba(91,155,213,0.15)", border: "1px solid #1e2a3a", borderRadius: 7, padding: "0.5rem 0.85rem", color: fetchingUrl ? "#4a6a8a" : "#5b9bd5", cursor: !jobUrl.trim() || fetchingUrl ? "not-allowed" : "pointer", fontSize: "0.78rem", whiteSpace: "nowrap", opacity: !jobUrl.trim() ? 0.4 : 1, fontFamily: "'DM Sans', sans-serif" }}>
                   {fetchingUrl ? "⏳ Importing..." : "⬇ Import"}
                 </button>
               </div>
@@ -812,9 +1076,158 @@ export default function ResumeAgent() {
               </div>
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /><span style={{ color: "#3a2e1a", fontSize: "0.68rem", letterSpacing: "0.1em" }}>OR PASTE MANUALLY</span><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /></div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+              <div style={{ flex: 1, height: 1, background: "#1e1c24" }} />
+              <span style={{ color: "#8a7a68", fontSize: "0.68rem", letterSpacing: "0.1em" }}>OR PASTE MANUALLY</span>
+              <div style={{ flex: 1, height: 1, background: "#1e1c24" }} />
+            </div>
+
             <textarea value={jobDesc} onChange={e => setJobDesc(e.target.value)} placeholder="Paste the full job description here..." style={{ flex: 1, background: "#0e0c12", border: "1px solid #1e1c24", borderRadius: 8, padding: "0.85rem", color: "#d8d0c4", fontSize: "0.83rem", lineHeight: 1.7, outline: "none", minHeight: "40vh" }} />
-            <button onClick={() => setActiveTab(MODES.CHAT)} style={{ alignSelf: "flex-end", background: "linear-gradient(135deg, #d4a853, #8b6520)", border: "none", borderRadius: 7, padding: "0.5rem 1.25rem", color: "#0d0d0f", fontWeight: 600, cursor: "pointer", fontSize: "0.82rem" }}>Done → Chat</button>
+            <button onClick={() => setActiveTab(MODES.CHAT)} style={{ alignSelf: "flex-end", background: "linear-gradient(135deg, #d4a853, #8b6520)", border: "none", borderRadius: 7, padding: "0.5rem 1.25rem", color: "#0d0d0f", fontWeight: 600, cursor: "pointer", fontSize: "0.82rem", fontFamily: "'DM Sans', sans-serif" }}>Done → Chat</button>
+          </div>
+        )}
+
+        {/* ── Cover Letter Tab ── */}
+        {activeTab === MODES.COVER && (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {/* Sub-header: mode toggle + export */}
+            <div style={{ borderBottom: "1px solid #1e1c24", padding: "0.6rem 1.5rem", background: "#0a0a0d", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+              <div style={{ display: "flex", gap: "0.4rem" }}>
+                {[{ id: "tailor", label: "✏ Tailor Existing" }, { id: "create", label: "✦ Create from Scratch" }].map(m => (
+                  <button key={m.id} onClick={() => setCoverMode(m.id)}
+                    style={{ padding: "0.35rem 0.85rem", borderRadius: 20, border: `1px solid ${coverMode === m.id ? "#a084d0" : "#2a2420"}`, background: coverMode === m.id ? "rgba(160,132,208,0.15)" : "transparent", color: coverMode === m.id ? "#c8a8f0" : "#8a7a68", cursor: "pointer", fontSize: "0.78rem", fontFamily: "'DM Sans', sans-serif" }}>
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              <button onClick={handleCoverExport} disabled={coverMessages.length === 0 || coverExportState !== "idle"}
+                style={{ background: coverExportState === "done" ? "rgba(74,122,74,0.2)" : "rgba(160,132,208,0.1)", border: `1px solid ${coverExportState === "done" ? "#4a7a4a" : "#3a2a4a"}`, borderRadius: 7, padding: "0.35rem 0.8rem", color: coverExportState === "done" ? "#5cb85c" : "#a084d0", fontSize: "0.75rem", cursor: coverMessages.length > 0 && coverExportState === "idle" ? "pointer" : "not-allowed", opacity: coverMessages.length === 0 ? 0.4 : 1, fontFamily: "'DM Sans', sans-serif" }}>
+                {coverExportState === "done" ? "✓ Downloaded!" : coverExportState === "generating" ? "✦ Writing..." : coverExportState === "downloading" ? "⏳ Building..." : "⬇ Export Cover Letter"}
+              </button>
+            </div>
+
+            <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+              {/* Left panel: upload / paste (tailor mode only) */}
+              {coverMode === "tailor" && (
+                <div style={{ width: 270, borderRight: "1px solid #1e1c24", padding: "1rem", display: "flex", flexDirection: "column", gap: "0.65rem", overflowY: "auto", flexShrink: 0 }}>
+                  <div style={{ fontSize: "0.7rem", color: "#7a6050", textTransform: "uppercase", letterSpacing: "0.08em" }}>Upload Cover Letter</div>
+                  <div className="upload-zone"
+                    onDrop={e => { e.preventDefault(); setCoverDragOver(false); parseCoverFile(e.dataTransfer.files[0]); }}
+                    onDragOver={e => { e.preventDefault(); setCoverDragOver(true); }}
+                    onDragLeave={() => setCoverDragOver(false)}
+                    onClick={() => coverFileInputRef.current?.click()}
+                    style={{ border: `2px dashed ${coverDragOver ? "#a084d0" : coverFileName ? "#4a7a4a" : "#2a2420"}`, borderRadius: 10, padding: "1.25rem 1rem", textAlign: "center", cursor: "pointer", background: coverDragOver ? "rgba(160,132,208,0.06)" : coverFileName ? "rgba(74,122,74,0.06)" : "rgba(255,255,255,0.01)", display: "flex", flexDirection: "column", alignItems: "center", gap: "0.35rem" }}>
+                    <input ref={coverFileInputRef} type="file" accept=".docx,.doc" style={{ display: "none" }} onChange={e => { parseCoverFile(e.target.files[0]); e.target.value = ""; }} />
+                    {coverFileLoading ? <div style={{ color: "#a084d0", fontSize: "0.82rem" }}>⏳ Reading...</div>
+                      : coverFileName ? <><div style={{ fontSize: "1.25rem" }}>✅</div><div style={{ color: "#6ab86a", fontSize: "0.78rem", fontWeight: 600, wordBreak: "break-all" }}>{coverFileName}</div><div style={{ color: "#4a6a4a", fontSize: "0.65rem" }}>Click to replace</div></>
+                      : <><div style={{ fontSize: "1.5rem" }}>✉</div><div style={{ color: "#a084d0", fontSize: "0.8rem", fontWeight: 600 }}>Drop .docx here</div><div style={{ color: "#4a3a28", fontSize: "0.68rem" }}>or click to browse</div></>}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /><span style={{ color: "#4a3a28", fontSize: "0.65rem" }}>OR PASTE</span><div style={{ flex: 1, height: 1, background: "#1e1c24" }} /></div>
+                  <textarea value={coverLetter} onChange={e => { setCoverLetter(e.target.value); if (coverFileName) setCoverFileName(""); }} placeholder="Paste your existing cover letter..." style={{ background: "#0e0c12", border: "1px solid #1e1c24", borderRadius: 8, padding: "0.75rem", color: "#d8d0c4", fontSize: "0.8rem", lineHeight: 1.65, outline: "none", minHeight: "18vh", fontFamily: "'DM Sans', sans-serif" }} />
+                  {coverLetter && coverMessages.length === 0 && (
+                    <button onClick={() => sendCoverMessage("Please review my cover letter and suggest improvements to better align it with the job description.")}
+                      style={{ background: "rgba(160,132,208,0.12)", border: "1px solid #3a2a4a", borderRadius: 7, padding: "0.5rem", color: "#c8a8f0", cursor: "pointer", fontSize: "0.78rem", fontFamily: "'DM Sans', sans-serif" }}>
+                      ✦ Review & Tailor →
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Right panel: chat */}
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+                <div style={{ background: "rgba(160,132,208,0.07)", borderBottom: "1px solid #1e1c2a", padding: "0.35rem 1.25rem", fontSize: "0.72rem", color: "#8060a0", flexShrink: 0 }}>
+                  {coverMode === "create"
+                    ? `✦ Create mode — ${hasResume ? "resume loaded" : "no resume"}${jobDesc ? " · job description loaded" : " · no job description"}`
+                    : `✏ Tailor mode — ${coverLetter ? "cover letter loaded" : "upload or paste your cover letter"}${jobDesc ? " · job description loaded" : ""}`}
+                </div>
+
+                <div style={{ flex: 1, overflowY: "auto", padding: "1rem 1.25rem", display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+                  {coverMessages.length === 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flex: 1, gap: "1.25rem" }}>
+                      <div style={{ textAlign: "center" }}>
+                        <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>✉</div>
+                        <div style={{ fontFamily: "'Playfair Display', serif", color: "#c8a8f0", fontSize: "1.1rem", marginBottom: "0.35rem" }}>
+                          {coverMode === "create" ? "Create a Cover Letter" : "Tailor Your Cover Letter"}
+                        </div>
+                        <div style={{ color: "#5a4a58", fontSize: "0.82rem", maxWidth: 340, lineHeight: 1.6 }}>
+                          {coverMode === "create"
+                            ? "I'll write a compelling cover letter using your resume and job description."
+                            : coverLetter ? "Cover letter loaded. Ask me to tailor, strengthen, or rewrite any section."
+                            : "Upload or paste your cover letter on the left, then ask me to improve it."}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", justifyContent: "center", maxWidth: 460 }}>
+                        {(coverMode === "create" ? [
+                          "Write a cover letter for this job",
+                          "Create a formal cover letter from my resume",
+                          "Write one with a strong opening hook",
+                          "Keep it concise — one page max",
+                        ] : [
+                          "Tailor this to the job description",
+                          "Strengthen the opening paragraph",
+                          "Add specific accomplishments from my resume",
+                          "Make it more concise",
+                          "Improve the closing paragraph",
+                        ]).map((s, i) => (
+                          <button key={i} onClick={() => sendCoverMessage(s)} className="suggestion-chip"
+                            style={{ background: "rgba(160,132,208,0.06)", border: "1px solid #2a2038", borderRadius: 20, padding: "0.35rem 0.8rem", color: "#8060a0", cursor: "pointer", fontSize: "0.75rem", fontFamily: "'DM Sans', sans-serif" }}>{s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {coverMessages.map((msg, i) => {
+                    const isLast = i === coverMessages.length - 1;
+                    const isAssistant = msg.role === "assistant";
+                    let mainContent = msg.content;
+                    let followUps = [];
+                    if (isAssistant) {
+                      const fuMatch = msg.content.match(/\*\*Follow-ups?:\*\*([\s\S]*?)$/i);
+                      if (fuMatch) { mainContent = msg.content.slice(0, fuMatch.index).trim(); followUps = fuMatch[1].trim().split("\n").map(l => l.replace(/^[-*•]\s*/, "").trim()).filter(Boolean); }
+                    }
+                    return (
+                      <div key={i} className="msg-bubble">
+                        <div style={{ display: "flex", justifyContent: isAssistant ? "flex-start" : "flex-end", gap: "0.5rem", alignItems: "flex-start" }}>
+                          {isAssistant && <div style={{ width: 26, height: 26, flexShrink: 0, background: "linear-gradient(135deg, #a084d0, #6040a0)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, marginTop: 3 }}>✉</div>}
+                          <div style={{ maxWidth: isAssistant ? "86%" : "70%", background: isAssistant ? "#0e0c14" : "linear-gradient(135deg, #1a1020, #140c18)", border: `1px solid ${isAssistant ? "#1e1c2a" : "#3a2848"}`, borderRadius: isAssistant ? "4px 14px 14px 14px" : "14px 4px 14px 14px", padding: isAssistant ? "0.9rem 1.1rem" : "0.65rem 0.9rem" }}>
+                            {isAssistant && isLast ? <TypewriterText text={mainContent} /> : isAssistant ? formatMessage(mainContent) : <span style={{ whiteSpace: "pre-wrap", fontSize: "0.875rem", color: "#d8d0c4", lineHeight: 1.65 }}>{msg.content}</span>}
+                          </div>
+                        </div>
+                        {isAssistant && followUps.length > 0 && (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginTop: "0.5rem", marginLeft: "2rem" }}>
+                            {followUps.map((fu, j) => <button key={j} onClick={() => sendCoverMessage(fu)} className="followup-chip" style={{ background: "rgba(160,132,208,0.06)", border: "1px solid #2a2038", borderRadius: 20, padding: "0.28rem 0.7rem", color: "#7060a0", cursor: "pointer", fontSize: "0.72rem", fontFamily: "'DM Sans', sans-serif" }}>{fu}</button>)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {coverLoading && (
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start" }}>
+                      <div style={{ width: 26, height: 26, background: "linear-gradient(135deg, #a084d0, #6040a0)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11 }}>✉</div>
+                      <div style={{ background: "#0e0c14", border: "1px solid #1e1c2a", borderRadius: "4px 14px 14px 14px", padding: "0.75rem 1rem", display: "flex", gap: 5, alignItems: "center" }}>
+                        {[0,1,2].map(i => <div key={i} style={{ width: 6, height: 6, background: "#a084d0", borderRadius: "50%", animation: `blink 1.2s ${i*0.2}s ease-in-out infinite`, opacity: 0.6 }} />)}
+                      </div>
+                    </div>
+                  )}
+                  <div ref={coverMessagesEndRef} />
+                </div>
+
+                {/* Cover input bar */}
+                <div style={{ borderTop: "1px solid #1e1c24", padding: "0.75rem 1.25rem", background: "#0a0a0d", display: "flex", gap: "0.5rem", alignItems: "flex-end", flexShrink: 0 }}>
+                  <textarea ref={coverTextareaRef} value={coverInput}
+                    onChange={e => { setCoverInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
+                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendCoverMessage(); } }}
+                    placeholder={coverMode === "create" ? "Ask me to write a cover letter for this role..." : "Ask me to tailor, improve, or rewrite any section..."}
+                    rows={1}
+                    style={{ flex: 1, background: "#0e0c12", border: "1px solid #2a2038", borderRadius: 10, padding: "0.65rem 0.85rem", color: "#d8d0c4", fontSize: "0.85rem", outline: "none", lineHeight: 1.6, maxHeight: 120, overflow: "auto", fontFamily: "'DM Sans', sans-serif" }}
+                  />
+                  <button onClick={() => sendCoverMessage()} disabled={!coverInput.trim() || coverLoading}
+                    style={{ background: "linear-gradient(135deg, #a084d0, #6040a0)", border: "none", borderRadius: 9, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: coverInput.trim() && !coverLoading ? "pointer" : "not-allowed", fontSize: 16, flexShrink: 0, opacity: !coverInput.trim() || coverLoading ? 0.4 : 1 }}>→</button>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -822,10 +1235,24 @@ export default function ResumeAgent() {
         {activeTab === MODES.CHAT && (
           <>
             {hasResume && (
-              <div style={{ background: "rgba(74,122,74,0.08)", borderBottom: "1px solid #1a2e1a", padding: "0.35rem 1.5rem", fontSize: "0.72rem", color: "#4a8a4a", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
-                ✓ Resume visible to agent{resumeFileName ? ` · ${resumeFileName}` : ""}
-                {resumeArrayBuffer ? " · format-preserving export ready" : ""}
-                {jobDesc ? " · job description loaded" : ""}
+              <div style={{ background: "rgba(74,122,74,0.08)", borderBottom: "1px solid #1a2e1a", padding: "0.35rem 1.5rem", fontSize: "0.72rem", color: "#4a8a4a", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+                <span>
+                  ✓ {resumeSlots[activeResumeIdx].nickname || `Resume ${activeResumeIdx + 1}`} active
+                  {resumeFileName ? ` (${resumeFileName})` : ""}
+                  {loadedCount > 1 ? ` · ${loadedCount} resumes loaded` : ""}
+                  {resumeArrayBuffer ? " · format-preserving export ready" : ""}
+                  {jobDesc ? " · job description loaded" : ""}
+                </span>
+                {loadedCount > 1 && (
+                  <div style={{ display: "flex", gap: "0.3rem" }}>
+                    {resumeSlots.map((slot, idx) => slot.text.trim() && (
+                      <button key={idx} onClick={() => setActiveResumeIdx(idx)}
+                        style={{ padding: "0.15rem 0.5rem", borderRadius: 10, border: `1px solid ${idx === activeResumeIdx ? "#5cb85c" : "#2a4a2a"}`, background: idx === activeResumeIdx ? "rgba(92,184,92,0.15)" : "transparent", color: idx === activeResumeIdx ? "#5cb85c" : "#3a6a3a", cursor: "pointer", fontSize: "0.62rem", fontFamily: "'DM Sans', sans-serif", maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {slot.nickname || `R${idx + 1}`}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -945,13 +1372,7 @@ export default function ResumeAgent() {
                 Created by Brandon Klask
               </span>
               <span style={{ fontSize: "0.7rem", color: "#9a8060", letterSpacing: "0.04em" }}>
-                Powered by{" "}
-                <a href="https://claude.ai" target="_blank" rel="noopener noreferrer"
-                  style={{ color: "#9a8060", textDecoration: "none" }}
-                  onMouseEnter={e => e.target.style.color = "#d4a853"}
-                  onMouseLeave={e => e.target.style.color = "#9a8060"}>
-                  Claude.ai
-                </a>
+                Powered by Claude.ai
               </span>
             </div>
           </>
