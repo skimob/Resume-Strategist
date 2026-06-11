@@ -283,7 +283,7 @@ const ScorePanel = ({ resume, jobDesc, onClose }) => {
   useEffect(() => {
     const run = async () => {
       try {
-        const res = await fetch("/api/claude", {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "claude-sonnet-4-20250514", max_tokens: 1000,
@@ -469,7 +469,7 @@ const InterviewPanel = ({ resume, jobDesc, onClose }) => {
   useEffect(() => {
     const run = async () => {
       try {
-        const res = await fetch("/api/claude", {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "claude-sonnet-4-20250514", max_tokens: 1500,
@@ -531,6 +531,12 @@ export default function ResumeAgent() {
   const [fileError, setFileError] = useState("");
   const [exportState, setExportState] = useState("idle");
   const [exportedText, setExportedText] = useState("");
+
+  // Track context changes mid-conversation
+  const [contextUpdates, setContextUpdates] = useState([]);
+  const prevResumeRef = useRef("");
+  const prevJobDescRef = useRef("");
+  const prevActiveIdxRef = useRef(0);
   const [coverLetter, setCoverLetter] = useState("");
   const [coverArrayBuffer, setCoverArrayBuffer] = useState(null);
   const [coverFileName, setCoverFileName] = useState("");
@@ -558,6 +564,30 @@ export default function ResumeAgent() {
   const textareaRef = useRef(null);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
+
+  // Detect context changes mid-conversation and notify user
+  useEffect(() => {
+    if (messages.length === 0) {
+      prevResumeRef.current = resume;
+      prevJobDescRef.current = jobDesc;
+      prevActiveIdxRef.current = activeResumeIdx;
+      return;
+    }
+    const updates = [];
+    if (resume !== prevResumeRef.current || activeResumeIdx !== prevActiveIdxRef.current) {
+      const label = resumeSlots[activeResumeIdx].nickname || `Resume ${activeResumeIdx + 1}`;
+      updates.push({ type: "resume", message: `Resume updated — now using ${label}${resumeFileName ? ` (${resumeFileName})` : ""}` });
+      prevResumeRef.current = resume;
+      prevActiveIdxRef.current = activeResumeIdx;
+    }
+    if (jobDesc !== prevJobDescRef.current) {
+      updates.push({ type: "job", message: jobDesc ? "Job description updated — agent will use the new version" : "Job description cleared" });
+      prevJobDescRef.current = jobDesc;
+    }
+    if (updates.length > 0) {
+      setContextUpdates(prev => [...prev, ...updates.map(u => ({ ...u, id: Date.now() + Math.random() }))]);
+    }
+  }, [resume, jobDesc, activeResumeIdx]);
 
   // Auto-save session after each exchange
   useEffect(() => {
@@ -616,7 +646,7 @@ export default function ResumeAgent() {
     setCoverMessages(newMessages);
     setCoverLoading(true);
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
@@ -637,7 +667,7 @@ export default function ResumeAgent() {
     const conversationSummary = coverMessages.map(m => `${m.role === "user" ? "User" : "Agent"}: ${m.content}`).join("\n\n");
     const original = coverLetter || "";
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
@@ -707,7 +737,7 @@ export default function ResumeAgent() {
         : rawText.trim();
 
       // Step 2: Send scraped text to Claude to extract just the job description
-      const claudeRes = await fetch("/api/claude", {
+      const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -743,7 +773,7 @@ export default function ResumeAgent() {
     setMessages(newMessages);
     setLoading(true);
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 2000,
@@ -779,7 +809,7 @@ export default function ResumeAgent() {
     setExportState("generating");
     const conversationSummary = messages.map(m => `${m.role === "user" ? "User" : "Agent"}: ${m.content}`).join("\n\n");
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514", max_tokens: 3000,
@@ -1253,6 +1283,29 @@ export default function ResumeAgent() {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Context update notifications */}
+            {contextUpdates.length > 0 && (
+              <div style={{ flexShrink: 0 }}>
+                {contextUpdates.map((update, i) => (
+                  <div key={update.id} style={{ background: update.type === "resume" ? "rgba(212,168,83,0.08)" : "rgba(91,155,213,0.08)", borderBottom: `1px solid ${update.type === "resume" ? "#3a2e1a" : "#1e2a3a"}`, padding: "0.35rem 1.5rem", fontSize: "0.72rem", color: update.type === "resume" ? "#c8a84a" : "#5b9bd5", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span>↻ {update.message}</span>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                      <button
+                        onClick={() => {
+                          setContextUpdates([]);
+                          sendMessage(`I have updated the ${update.type === "resume" ? "resume" : "job description"}. Please acknowledge the new content and let me know if I should re-analyze anything.`);
+                        }}
+                        style={{ background: "rgba(212,168,83,0.12)", border: "1px solid #3a2e1a", borderRadius: 6, padding: "0.15rem 0.55rem", color: "#d4a853", cursor: "pointer", fontSize: "0.68rem", fontFamily: "'DM Sans', sans-serif" }}>
+                        Notify Agent →
+                      </button>
+                      <button onClick={() => setContextUpdates(prev => prev.filter(u => u.id !== update.id))}
+                        style={{ background: "none", border: "none", color: "#4a3a28", cursor: "pointer", fontSize: "0.8rem" }}>✕</button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
 
